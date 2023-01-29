@@ -4,6 +4,8 @@ import time
 import math
 import sys
 
+#Utility class, used to calculate things like confidence bound 
+
 class utils:
     def __init__(self,eps, delta, M, P,R,C,EPISODE_LENGTH,N_STATES,ACTIONS,CONSTRAINT,Cb):
         self.P = P.copy()
@@ -34,11 +36,11 @@ class utils:
         self.beta_prob_1 = {}#np.zeros((self.N_STATES,self.N_ACTIONS))
         self.beta_prob_2 = {}#np.zeros((self.N_STATES,self.N_ACTIONS))
         self.beta_prob_T = {}
-        self.Psparse = [[[] for i in self.ACTIONS] for j in range(self.N_STATES)]
-        
-        self.mu = np.zeros(self.N_STATES)
+        self.Psparse = [[[] for i in self.ACTIONS] for j in range(self.N_STATES)] #[[[], []..], [[],..], .. ]
+        self.mu = np.zeros(self.N_STATES) #Indicator function
         self.mu[0] = 1.0
         self.CONSTRAINT = CONSTRAINT
+
         
         self.R_Tao = {}
         for s in range(self.N_STATES):
@@ -64,88 +66,113 @@ class utils:
                 self.P_hat[s][a] = np.zeros(self.N_STATES)
                 for s_1 in range(self.N_STATES):
                     if self.P[s][a][s_1] > 0:
-                        self.Psparse[s][a].append(s_1)
+                        self.Psparse[s][a].append(s_1) #unknown
     
+    def format_display(self, s, value):
+        suffix = '-------------'
+        print('{} {} {}'.format(suffix, s, suffix))
+        for v in value:
+            print(v)
 
     def step(self,s, a, h):
+        '''
+        step in an episode 
+        '''
         probs = np.zeros((self.N_STATES))
         for next_s in range(self.N_STATES):
             probs[next_s] = self.P[s][a][next_s]
-        next_state = int(np.random.choice(np.arange(self.N_STATES),1,replace=True,p=probs))
+        #probs = np.array(self.P[s][a])
+        next_state = int(np.random.choice(np.arange(self.N_STATES),1,replace=True,p=probs))#random choose according to probs
         rew = self.R[s][a]
         cost = self.C[s][a]
         return next_state,rew, cost
-
-
+    
     def setCounts(self,ep_count_p,ep_count):
+        '''
+        NUMBER_OF_OCCURANCES[s][a]: number of times the pair (s, a) was observed
+        NUMBER_OF_OCCURANCES_p[s][a, s_]: number of times the pair (s, a, s_) was observed
+        '''
         for s in range(self.N_STATES):
             for a in self.ACTIONS[s]:
                 self.NUMBER_OF_OCCURANCES[s][a] += ep_count[s, a]
                 for s_ in range(self.N_STATES):
                     self.NUMBER_OF_OCCURANCES_p[s][a, s_] += ep_count_p[s, a, s_]
 
-
     def compute_confidence_intervals(self,ep, mode):
+        '''
+        @parama ep: namely L, used as constant in formula, log(2SAHK / delta) in Pk and 2log(6SAHK / delta) in Rk and Ck.
+
+        DOPE-in.py only uses mode = 1(episode <= K0) and mode = 0 
+        '''
         for s in range(self.N_STATES):
             for a in self.ACTIONS[s]:
+                #unknown
                 if self.NUMBER_OF_OCCURANCES[s][a] == 0:
                     self.beta_prob[s][a, :] = np.ones(self.N_STATES)
-                    self.beta_prob_T[s][a] = np.sqrt(ep/max(self.NUMBER_OF_OCCURANCES[s][a],1))
+                    self.beta_prob_T[s][a] = np.sqrt(ep/max(self.NUMBER_OF_OCCURANCES[s][a],1))# beta used for confidence set Rk and Ck
                 else:
                     if mode == 2:
+                        #c(s,a) = c_hat + beta, here's the beta part
                         self.beta_prob[s][a, :] = min(np.sqrt(ep/max(self.NUMBER_OF_OCCURANCES[s][a], 1)), 1)*np.ones(self.N_STATES)
                     elif mode == 3:
                         self.beta_prob_T[s][a] = np.sqrt(ep/max(self.NUMBER_OF_OCCURANCES[s][a],1))
                         
                     for s_1 in range(self.N_STATES):
-                        if mode == 0:
-                            self.beta_prob[s][a,s_1] = min(np.sqrt(ep*self.P_hat[s][a][s_1]*(1-self.P_hat[s][a][s_1])/max(self.NUMBER_OF_OCCURANCES[s][a],1)) + ep/(max(self.NUMBER_OF_OCCURANCES[s][a],1)), ep/(max(np.sqrt(self.NUMBER_OF_OCCURANCES[s][a]),1)), 1)
-                        elif mode == 1:
+                        if mode == 0: #episode > K0
+                            self.beta_prob[s][a, s_1] = min(np.sqrt(ep*self.P_hat[s][a][s_1]*(1-self.P_hat[s][a][s_1])/max(self.NUMBER_OF_OCCURANCES[s][a],1)) + ep/(max(self.NUMBER_OF_OCCURANCES[s][a],1)), ep/(max(np.sqrt(self.NUMBER_OF_OCCURANCES[s][a]),1)), 1)
+                        elif mode == 1: #episode <= K0
+                            #P(s,a,s') =  P_hat + beta(s,a,s'), here's the beta(s,a,s') part
                             self.beta_prob[s][a, s_1] = min(2*np.sqrt(ep*self.P_hat[s][a][s_1]*(1-self.P_hat[s][a][s_1])/max(self.NUMBER_OF_OCCURANCES[s][a],1)) + 14*ep/(3*max(self.NUMBER_OF_OCCURANCES[s][a],1)), 1)
                         
                 self.beta_prob_1[s][a] = max(self.beta_prob[s][a, :])
                 self.beta_prob_2[s][a] = sum(self.beta_prob[s][a, :])
 
-
     def update_empirical_model(self,ep):
+        '''
+        Update P_hat according to NUMBER_OF_OCCURANCES_p
+        '''
         for s in range(self.N_STATES):
             for a in self.ACTIONS[s]:
                 if self.NUMBER_OF_OCCURANCES[s][a] == 0:
-                    self.P_hat[s][a] = 1/self.N_STATES*np.ones(self.N_STATES)
+                    self.P_hat[s][a] = 1/self.N_STATES*np.ones(self.N_STATES) #equal for each action
                 else:
                     for s_1 in range(self.N_STATES):
                         self.P_hat[s][a][s_1] = self.NUMBER_OF_OCCURANCES_p[s][a,s_1]/(max(self.NUMBER_OF_OCCURANCES[s][a],1))
-                    self.P_hat[s][a] /= np.sum(self.P_hat[s][a])
-                if abs(sum(self.P_hat[s][a]) - 1)  >  0.001:
-                    print("empirical is wrong")
-                    print(self.P_hat)
-                    
+                    self.P_hat[s][a] /= np.sum(self.P_hat[s][a]) #normalize probability for each(s,a), i.e. [1,2,3] -> [0.16,0.33,0.5]
+                if abs(sum(self.P_hat[s][a]) - 1)  >  0.001: #error handling, make sure sum(P(s,a)) = 1
+                    self.format_display("!!! Empirical is wrong !!!", [self.P_hat])
                     
     def update_costs(self):
+        '''
+        used in OptPessLP
+        '''
         alpha_r = (self.N_STATES*self.EPISODE_LENGTH) + 4*self.EPISODE_LENGTH*(self.N_STATES*self.EPISODE_LENGTH)/(self.CONSTRAINT-self.Cb)
         for s in range(self.N_STATES):
             for a in self.ACTIONS[s]:
-                self.R_Tao[s][a] = self.R[s][a] + alpha_r * self.beta_prob_T[s][a]
-                self.C_Tao[s][a] = self.C[s][a] + (self.EPISODE_LENGTH * self.N_STATES)*self.beta_prob_T[s][a]
+                self.R_Tao[s][a] = self.R[s][a] + alpha_r * self.beta_prob_T[s][a] #confidence set for R_k
+                self.C_Tao[s][a] = self.C[s][a] + (self.EPISODE_LENGTH * self.N_STATES)*self.beta_prob_T[s][a] #confidence set for C_k
 
 
 
 
 
     def compute_opt_LP_Unconstrained(self, ep):
+        '''
+        Initialize a LP problem using PuLP, goal is to maximize the linear function 
+        '''
         opt_policy = np.zeros((self.N_STATES,self.EPISODE_LENGTH,self.N_STATES)) #[s,h,a]
-        opt_prob = p.LpProblem("OPT_LP_problem",p.LpMaximize)
+        opt_prob = p.LpProblem("OPT_LP_problem",p.LpMaximize) # initialize
         opt_q = np.zeros((self.EPISODE_LENGTH,self.N_STATES,self.N_STATES)) #[h,s,a]
     
         #create problem variables
-        q_keys = [(h,s,a) for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]]
-        q = p.LpVariable.dicts("q",q_keys,lowBound=0,cat='Continuous')
+        q_keys = [(h,s,a) for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]] #keys for policy
+        q = p.LpVariable.dicts("q",q_keys,lowBound=0,cat='Continuous') # state-action-state occupancy measure, continuous variable, lowBound >= 0
         
         #Objective function
-        list_1 = [self.R[s][a] for s in range(self.N_STATES) for a in self.ACTIONS[s]] * self.EPISODE_LENGTH
+        list_1 = [self.R[s][a] for s in range(self.N_STATES) for a in self.ACTIONS[s]] * self.EPISODE_LENGTH #flatten R and repeat EPISODE_LENGTH times
         list_2 = [q[(h,s,a)] for  h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]]
 
-        opt_prob += p.lpDot(list_1,list_2)
+        opt_prob += p.lpDot(list_1,list_2) #objective function, maximize expected reward over EPISODE_LENGTH  
                   
         #opt_prob += p.lpSum([q[(h,s,a)]*self.R[s,a] for  h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in range(self.N_ACTIONS)])
                   
@@ -153,33 +180,35 @@ class utils:
             for s in range(self.N_STATES):
                 q_list = [q[(h,s,a)] for a in self.ACTIONS[s]]
                 pq_list = [self.P[s_1][a_1][s]*q[(h-1,s_1,a_1)] for s_1 in range(self.N_STATES) for a_1 in self.ACTIONS[s_1]]
-                opt_prob += p.lpSum(q_list) - p.lpSum(pq_list) == 0
+                opt_prob += p.lpSum(q_list) - p.lpSum(pq_list) == 0 #constraint 1[18(c) in paper], sigma_a_s'(q_h(s,a,s')) == sigma_s'_a'(q_h-1(s',a',s))
         for s in range(self.N_STATES):
             q_list = [q[(0,s,a)] for a in self.ACTIONS[s]]
-            opt_prob += p.lpSum(q_list) - self.mu[s] == 0
+            opt_prob += p.lpSum(q_list) - self.mu[s] == 0 #constraint 2[18(d) in paper], sigma(q_1(s,a,s')) == Indicator(s = s1))
                 
-        status = opt_prob.solve(p.PULP_CBC_CMD(fracGap=0.001, msg = 0))
+        status = opt_prob.solve(p.PULP_CBC_CMD(fracGap=0.001, msg = 0)) #solve problem with above conditions
         #print(p.LpStatus[status])   # The solution status
         #print(opt_prob)
-        print("printing best value")
-        print(p.value(opt_prob.objective))
+        self.format_display("Printing Best Value in [Unconstrained]", [p.value(opt_prob.objective)])
+        #print(p.value(opt_prob.objective))
         # for constraint in opt_prob.constraints:
         #     print(opt_prob.constraints[constraint].name, opt_prob.constraints[constraint].value() - opt_prob.constraints[constraint].constant)
                           
+        #construct optimal policy
         for h in range(self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 for a in self.ACTIONS[s]:
                     opt_q[h,s,a] = q[(h,s,a)].varValue
                 for a in self.ACTIONS[s]:
                     if np.sum(opt_q[h,s,:]) == 0:
-                        opt_policy[s,h,a] = 1/len(self.ACTIONS[s])
+                        opt_policy[s,h,a] = 1/len(self.ACTIONS[s]) #equal for each action
                     else:
-                        opt_policy[s,h,a] = opt_q[h,s,a]/np.sum(opt_q[h,s,:])
+                        opt_policy[s,h,a] = opt_q[h,s,a]/np.sum(opt_q[h,s,:]) #according to probability
                     probs = opt_policy[s,h,:]
-                                                                  
+
         if ep != 0:
             return opt_policy, 0, 0, 0
-                                                                          
+
+        #unknown                                                          
         q_policy, value_of_policy, cost_of_policy = self.FiniteHorizon_Policy_evaluation(self.P, opt_policy, self.R, self.C)
         
         val_policy = 0
@@ -195,42 +224,40 @@ class utils:
                     opt_q[h,s,a] = 1.0
                 
                 val_policy += opt_q[h,s,a]*self.R[s][a]
-                    
-        print("value from the UnconLPsolver")
-        print(val_policy,con_policy)
-                                                                          
+        self.format_display("Reward and cost from the UnconLPsolver", [val_policy, con_policy])
         return opt_policy, value_of_policy, cost_of_policy, q_policy
                                                                                   
                                                                                   
     def compute_opt_LP_Constrained(self, ep):
         opt_policy = np.zeros((self.N_STATES,self.EPISODE_LENGTH,self.N_STATES)) #[s,h,a]
-        opt_prob = p.LpProblem("OPT_LP_problem",p.LpMaximize)
+        opt_prob = p.LpProblem("OPT_LP_problem",p.LpMaximize)# initialize a LP problem using PuLP, goal is to maximize the linear func 
         opt_q = np.zeros((self.EPISODE_LENGTH,self.N_STATES,self.N_STATES)) #[h,s,a]
                                                                                   
         #create problem variables
         q_keys = [(h,s,a) for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]]
                                                                                           
-        q = p.LpVariable.dicts("q",q_keys,lowBound=0,cat='Continuous')
+        q = p.LpVariable.dicts("q",q_keys,lowBound=0,cat='Continuous')# state-action-state occupancy measure, continuous variable, lowBound >= 0
 
+        #objective function, maximize expected reward over EPISODE_LENGTH  
         opt_prob += p.lpSum([q[(h,s,a)]*self.R[s][a] for  h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]])
-            
+
+        #constraint 1, sigma(q(s,a,s')*c(s.a)) <= CONSTRAINT 
         opt_prob += p.lpSum([q[(h,s,a)]*self.C[s][a] for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s]]) - self.CONSTRAINT <= 0
             
         for h in range(1,self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 q_list = [q[(h,s,a)] for a in self.ACTIONS[s]]
                 pq_list = [self.P[s_1][a_1][s]*q[(h-1,s_1,a_1)] for s_1 in range(self.N_STATES) for a_1 in self.ACTIONS[s_1]]
-                opt_prob += p.lpSum(q_list) - p.lpSum(pq_list) == 0
+                opt_prob += p.lpSum(q_list) - p.lpSum(pq_list) == 0 #constraint 2, sigma(q_h(s,a,s')) == sigma(q_h-1(s',a',s))
 
         for s in range(self.N_STATES):
             q_list = [q[(0,s,a)] for a in self.ACTIONS[s]]
-            opt_prob += p.lpSum(q_list) - self.mu[s] == 0
+            opt_prob += p.lpSum(q_list) - self.mu[s] == 0 #constraint 3, sigma(q_1(s,a,s')) == Indicator(s = s1))
 
         status = opt_prob.solve(p.PULP_CBC_CMD(fracGap=0.001, msg = 0))
         #print(p.LpStatus[status])   # The solution status
         #print(opt_prob)
-        print("printing best value constrained")
-        print(p.value(opt_prob.objective))
+        self.format_display("Printing Best Value in [Constrained]", [p.value(opt_prob.objective)])
                                                                                                                   
         # for constraint in opt_prob.constraints:
         #     print(opt_prob.constraints[constraint].name, opt_prob.constraints[constraint].value() - opt_prob.constraints[constraint].constant)
@@ -247,8 +274,8 @@ class utils:
                         if math.isnan(opt_policy[s,h,a]):
                             opt_policy[s,h,a] = 1/len(self.ACTIONS[s])
                         elif opt_policy[s,h,a] > 1.0:
-                            print("invalid value printing")
-                            print(opt_policy[s,h,a])
+                            self.format_display("!!! Invalid value printing !!!", [opt_policy[s,h,a]])
+
                 #probs = opt_policy[s,h,:]
                 #optimal_policy[s,h] = int(np.argmax(probs))
                                                                                                                                                                   
@@ -267,9 +294,7 @@ class utils:
                     
                 con_policy  += opt_q[h,s,a]*self.C[s][a]
                 val_policy += opt_q[h,s,a]*self.R[s][a]
-        print("value from the conLPsolver")
-        print(val_policy,con_policy)
-
+        self.format_display("Reward and cost from the conLPsolver", [val_policy, con_policy])
         q_policy, value_of_policy, cost_of_policy = self.FiniteHorizon_Policy_evaluation(self.P, opt_policy, self.R, self.C)
                                                                                                                                                                           
         return opt_policy, value_of_policy, cost_of_policy, q_policy
@@ -293,32 +318,34 @@ class utils:
         #     for a in self.ACTIONS[s]:
         #         r_k[s][a] = self.R[s][a] + self.EPISODE_LENGTH**2/(self.CONSTRAINT - cb)* self.beta_prob_2[s][a]
 
+        #maximize expected reward
         opt_prob += p.lpSum([z[(h,s,a,s_1)]*self.R[s][a] for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s] for s_1 in self.Psparse[s][a]])
-        #Constraints
+
+        #constraint 1, sigma(q(s,a,s')*c(s.a)) <= CONSTRAINT, replacing cost function with pessimist constraint cost function 
         opt_prob += p.lpSum([z[(h,s,a,s_1)]*(self.C[s][a] + self.EPISODE_LENGTH*self.beta_prob_2[s][a]) for h in range(self.EPISODE_LENGTH) for s in range(self.N_STATES) for a in self.ACTIONS[s] for s_1 in self.Psparse[s][a]]) - self.CONSTRAINT <= 0
 
         for h in range(1,self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 z_list = [z[(h,s,a,s_1)] for a in self.ACTIONS[s] for s_1 in self.Psparse[s][a]]
                 z_1_list = [z[(h-1,s_1,a_1,s)] for s_1 in range(self.N_STATES) for a_1 in self.ACTIONS[s_1] if s in self.Psparse[s_1][a_1]]
-                opt_prob += p.lpSum(z_list) - p.lpSum(z_1_list) == 0
+                opt_prob += p.lpSum(z_list) - p.lpSum(z_1_list) == 0 #constraint 2[18(c) in paper], sigma_a_s'(q_h(s,a,s')) == sigma_s'_a'(q_h-1(s',a',s))
                                                                                                                                                                                                               
         for s in range(self.N_STATES):
             q_list = [z[(0,s,a,s_1)] for a in self.ACTIONS[s] for s_1 in self.Psparse[s][a]]
-            opt_prob += p.lpSum(q_list) - self.mu[s] == 0
+            opt_prob += p.lpSum(q_list) - self.mu[s] == 0 #constraint 3[18(d) in paper], sigma(q_1(s,a,s')) == Indicator(s = s1))
                                                                                                                                                                                                                       
-                                                                                                                                                                                                                      #start_time = time.time()
+         #start_time = time.time()
         for h in range(self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 for a in self.ACTIONS[s]:
                     for s_1 in self.Psparse[s][a]:
-                        opt_prob += z[(h,s,a,s_1)] - (self.P_hat[s][a][s_1] + self.beta_prob[s][a,s_1]) *  p.lpSum([z[(h,s,a,y)] for y in self.Psparse[s][a]]) <= 0
-                        opt_prob += -z[(h,s,a,s_1)] + (self.P_hat[s][a][s_1] - self.beta_prob[s][a,s_1])* p.lpSum([z[(h,s,a,y)] for y in self.Psparse[s][a]]) <= 0
+                        opt_prob += z[(h,s,a,s_1)] - (self.P_hat[s][a][s_1] + self.beta_prob[s][a,s_1]) *  p.lpSum([z[(h,s,a,y)] for y in self.Psparse[s][a]]) <= 0 #constraint 18(f),z(s,a,s')-(opti confidence bound)*sigma(z(s,a,y))<=0
+                        opt_prob += -z[(h,s,a,s_1)] + (self.P_hat[s][a][s_1] - self.beta_prob[s][a,s_1])* p.lpSum([z[(h,s,a,y)] for y in self.Psparse[s][a]]) <= 0 #constraint 18(g),-z(s,a,s')+(pessi confidence bound)*sigma(z(s,a,y))<=0
                                                                                                                                                                                                                                         
         status = opt_prob.solve(p.PULP_CBC_CMD(fracGap=0.01, msg = 0))
                                                                                                                                                                                                                                       
-        if p.LpStatus[status] != 'Optimal':
-            print(p.LpStatus[status])
+        if p.LpStatus[status] != 'Optimal':#have no optimal solution
+            self.format_display('Have no optimal solution, status is', p.LpStatus[status])
             return np.zeros((self.N_STATES, self.EPISODE_LENGTH, self.N_STATES)), np.zeros((self.N_STATES, self.EPISODE_LENGTH)), np.zeros((self.N_STATES, self.EPISODE_LENGTH)), p.LpStatus[status], np.zeros((self.N_STATES, self.EPISODE_LENGTH, self.N_STATES))
                                                                                                                                                                                                                                                   
         for h in range(self.EPISODE_LENGTH):
@@ -331,19 +358,16 @@ class utils:
                         elif opt_z[h,s,a,s_1] < -0.001:
                             print("invalid value")
                             sys.exit()
-                                                                                                                                                                                                                                                                                  
-                                                                                                                                                                                                                                                                                  
-                                                                                                                                                                                                                                                                                  
-                                                                                                                                                                                                                                                                                  
+
         den = np.sum(opt_z,axis=(2,3))
         num = np.sum(opt_z,axis=3)
-                                                                                                                                                                                                                                                                                  
-                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                                                                                                                                                
         for h in range(self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 sum_prob = 0
                 for a in self.ACTIONS[s]:
-                    opt_policy[s,h,a] = num[h,s,a]/den[h,s]
+                    if den[h,s] != 0: #den[h,s] may equal to 0 here, add error handling. print('Error occurred in line373', den[h, s])
+                        opt_policy[s,h,a] = num[h,s,a]/den[h,s]
                     sum_prob += opt_policy[s,h,a]
                 if abs(sum(num[h,s,:]) - den[h,s]) > 0.0001:
                     print("wrong values")
@@ -354,7 +378,8 @@ class utils:
                         opt_policy[s,h,a] = 1/len(self.ACTIONS[s])
                 else:
                     for a in self.ACTIONS[s]:
-                        opt_policy[s,h,a] = opt_policy[s,h,a]/sum_prob
+                        if sum_prob != 0: #print('Error occurred in line386',sum_prob)
+                            opt_policy[s,h,a] = opt_policy[s,h,a]/sum_prob
 
         q_policy, value_of_policy, cost_of_policy = self.FiniteHorizon_Policy_evaluation(self.P, opt_policy, self.R, self.C)
                                                                                                                                                                                                                                                                                                                                                   
@@ -609,9 +634,13 @@ class utils:
         return opt_policy, value_of_policy, cost_of_policy, p.LpStatus[status], q_policy
 
     def FiniteHorizon_Policy_evaluation(self,Px,policy,R,C):
-        q = np.zeros((self.N_STATES,self.EPISODE_LENGTH, self.N_STATES))
-        v = np.zeros((self.N_STATES, self.EPISODE_LENGTH))
-        c = np.zeros((self.N_STATES,self.EPISODE_LENGTH))
+        '''
+        @param Px: self.P, probability model
+        @param policy: policy that needs to be evaluated
+        '''
+        q = np.zeros((self.N_STATES,self.EPISODE_LENGTH, self.N_STATES)) #q_policy
+        v = np.zeros((self.N_STATES, self.EPISODE_LENGTH)) #value
+        c = np.zeros((self.N_STATES,self.EPISODE_LENGTH)) #cost
         P_policy = np.zeros((self.N_STATES,self.EPISODE_LENGTH,self.N_STATES))
         R_policy = np.zeros((self.N_STATES,self.EPISODE_LENGTH))
         C_policy = np.zeros((self.N_STATES,self.EPISODE_LENGTH))
@@ -626,6 +655,7 @@ class utils:
                 q[s, self.EPISODE_LENGTH-1, a] = R[s][a]
             v[s,self.EPISODE_LENGTH-1] = np.dot(q[s, self.EPISODE_LENGTH-1, :], policy[s, self.EPISODE_LENGTH-1, :])
 
+        #construct R,C and P according to input policy
         for h in range(self.EPISODE_LENGTH):
             for s in range(self.N_STATES):
                 x = 0
@@ -641,9 +671,9 @@ class utils:
                         z += policy[s,h,a]*Px[s][a][s_1]
                     P_policy[s,h,s_1] = z #np.dot(policy[s,h,:],Px[s,:,s_1])
 
-        for h in range(self.EPISODE_LENGTH-2,-1,-1):
+        for h in range(self.EPISODE_LENGTH-2,-1,-1):# h = self.EPISODE_LENGTH-1 has been calculated above 
             for s in range(self.N_STATES):
-                c[s,h] = C_policy[s,h] + np.dot(P_policy[s,h,:],c[:,h+1])
+                c[s,h] = C_policy[s,h] + np.dot(P_policy[s,h,:],c[:,h+1]) #unknown
                 for a in self.ACTIONS[s]:
                     z = 0
                     for s_ in range(self.N_STATES):
